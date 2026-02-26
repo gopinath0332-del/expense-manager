@@ -167,7 +167,7 @@ Example `POST /api/upload` request body (multipart): `file=@report.pdf`, `source
 
 ## Technical Stack
 
-- **Frontend**: Vue.js (Vue 3 recommended)
+- **Frontend**: Vue.js (Vue 3 recommended) + Typescript
 - **UI Component Library**: Bootstrap Vue (https://bootstrap-vue.org/) for responsive and accessible UI components
 - **Backend**: Node.js/Firebase Functions (optional, for PDF processing)
 - **Database**: Firestore
