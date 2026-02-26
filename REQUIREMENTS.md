@@ -57,6 +57,106 @@ A web application to automatically extract, analyze, and track expense data from
 - Use Firestore transactions or batched writes when performing existence-check + insert to avoid race conditions
 - Provide configurable duplicate handling policies: skip, update existing record, or create a linked duplicate with audit metadata
 
+## User Stories & Acceptance Criteria
+
+- As a user, I can upload a PDF and see parsed transactions in a table.  
+  - Acceptance: All transactions appear with date, amount, vendor; no UI errors; duplicates are not created on re-upload.
+- As a user, I can filter expenses by date range and category.  
+  - Acceptance: Filters return correct subset and summary totals update accordingly.
+- As an admin, I can view import logs and deduplication decisions.  
+  - Acceptance: Import job shows skipped/updated/created counts and links to records.
+
+## Data Model (Canonical Expense Document)
+
+- Fields (recommended):
+  - `id` (string) — Firestore document ID (use fingerprint or transaction ID when available)
+  - `fingerprint` (string) — deterministic hash of normalized identifying fields
+  - `source` (string) — e.g., `phonepe`, `axis`, `hdfc`, `payzap`
+  - `source_transaction_id` (string|null)
+  - `date` (ISO 8601 date string)
+  - `amount` (number)
+  - `currency` (string, e.g., `INR`)
+  - `vendor` (string)
+  - `category` (string|null)
+  - `status` (string, e.g., `completed`, `pending`)
+  - `raw_text` (object) — raw extracted fields for debugging
+  - `source_file_checksum` (string) — checksum of the uploaded file
+  - `created_at` / `updated_at` (timestamps)
+
+Example JSON:
+
+```json
+{
+  "id": "5f4d...",
+  "fingerprint": "a3b2c1...",
+  "source": "axis",
+  "source_transaction_id": "AX12345",
+  "date": "2026-02-10",
+  "amount": 349.5,
+  "currency": "INR",
+  "vendor": "ACME STORE",
+  "category": "Groceries",
+  "status": "completed",
+  "raw_text": {"line": "10 Feb 2026 ACME STORE 349.50"},
+  "source_file_checksum": "sha256:...",
+  "created_at": "2026-02-26T10:15:00Z"
+}
+```
+
+## Deduplication — Concrete Pseudocode
+
+1. Normalize fields:
+   - `date` -> ISO 8601 (YYYY-MM-DD)
+   - `amount` -> numeric with 2 decimals
+   - `vendor` -> uppercase, trim, remove punctuation
+2. Compute fingerprint: `fingerprint = SHA256(date + '|' + amount + '|' + vendor + '|' + (type||""))`
+3. Attempt idempotent write:
+   - If `source_transaction_id` exists, use it as primary key to check/insert.
+   - Else, check Firestore for document with `fingerprint`.
+   - If found, apply duplicate policy (skip/update/mark duplicate).
+   - Else insert document with `id = fingerprint` (or a generated id) and store `fingerprint`.
+
+Pseudocode example:
+
+```text
+record = normalize(extracted)
+fingerprint = sha256(record.date + '|' + record.amount + '|' + record.vendor)
+docRef = firestore.collection('expenses').doc(fingerprint)
+firestore.runTransaction(tx -> {
+  existing = tx.get(docRef)
+  if (existing.exists) {
+    // handle according to policy
+    return {action: 'skipped', id: existing.id}
+  } else {
+    tx.set(docRef, {...record, fingerprint, source_file_checksum})
+    return {action: 'created', id: docRef.id}
+  }
+})
+```
+
+## API & Integration Contracts (brief)
+
+- `POST /api/upload` — multipart/form-data: `file`, `source`, `password?`  
+  - Response: `{ jobId, status: 'queued' }`
+- `GET /api/jobs/:jobId` — returns parse progress and summary (created/skipped/updated counts)
+- `GET /api/expenses` — queryable by `date`, `vendor`, `category`, `source`
+- Auth: use Firebase Auth tokens (Bearer) or API keys for server-to-server
+
+Example `POST /api/upload` request body (multipart): `file=@report.pdf`, `source=axis`, `password=****`
+
+## Testing Plan (brief)
+
+- Unit tests:
+  - Parser unit tests for each bank format with edge-case samples
+  - Deduplication unit tests (same record variations must fingerprint equal)
+- Integration tests:
+  - Upload -> parse -> persist workflow using test Firestore emulator
+  - Re-upload same file should not create duplicates
+- Test assets:
+  - Add a `test-data/` folder with representative PDF samples for PhonePe, Axis, HDFC, PayZap
+- CI:
+  - Run parser unit tests and integration tests against Firestore emulator on PRs
+
 ## Non-Functional Requirements
 
 - **Security**: Sensitive information (database credentials, API keys) must be stored in `.env` file, not in source code
